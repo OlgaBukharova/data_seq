@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import argparse
 import os
 import random
@@ -34,11 +36,11 @@ class DemoCfg:
     eps: float = 0.20
 
     # Channel used in demo
-    ch: ChannelCfg = ChannelCfg(
+    ch: ChannelCfg = field(default_factory=lambda: ChannelCfg(
         p_noise=0.50, noise_std=0.03,
         p_resize=0.30, resize_min=0.60, resize_max=1.00,
         p_crop=0.30, crop_min=0.70, crop_max=1.00,
-    )
+    ))
 
     # Visual
     diff_amp: float = 25.0
