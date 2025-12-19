@@ -104,10 +104,12 @@ def main() -> None:
 
     # Models
     enc = Encoder(L=cfg.L, hidden=64, eps=0.10).to(device)
-    dec = Decoder(L=cfg.L, hidden=128).to(device)
+    dec = Decoder(L=cfg.L, hidden=256).to(device)
 
-    opt = torch.optim.Adam(list(enc.parameters()) + list(dec.parameters()), lr=cfg.lr)
-
+    opt = torch.optim.Adam([
+        {"params": enc.parameters(), "lr": cfg.lr},
+        {"params": dec.parameters(), "lr": cfg.lr * 2.0},
+    ])
     loss_img_fn = nn.MSELoss()
     loss_msg_fn = nn.BCEWithLogitsLoss()
 
@@ -124,7 +126,7 @@ def main() -> None:
                 lambda_delta = 0.0
             else:
                 alpha = 0.5
-                beta = 6.0
+                beta = 10.0
                 lambda_delta = 0.002
 
             running_psnr = 0.0
