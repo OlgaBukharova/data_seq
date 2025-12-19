@@ -19,7 +19,7 @@ from utils.metrics import psnr, ber_from_logits
 @dataclass
 class TrainConfig:
     # Message / data
-    L: int = 256
+    L: int = 128
     batch_size: int = 128
     num_workers: int = 2
 
@@ -38,9 +38,13 @@ class TrainConfig:
     beta_msg_main: float = 10.0
     lambda_delta_main: float = 0.002
 
+    # Later: press harder on message after decoder "wakes up"
+    beta_boost_epoch: int = 8
+    beta_msg_boost: float = 15.0
+
     # Channel noise (helps decoder learn faster / more robustly)
-    noise_after_epoch: int = 1        # start adding noise from this epoch (0-based)
-    noise_std: float = 0.01           # in [-1,1] scale
+    noise_std: float = 0.02
+    noise_after_epoch: int = 2
 
     # Logging / saving
     log_every_steps: int = 200
@@ -115,14 +119,14 @@ def main() -> None:
     # Models
     # NOTE: Encoder uses eps internally in models/encoder.py
     enc = Encoder(L=cfg.L, hidden=64).to(device)
-    # Stronger decoder helps capacity for 256 bits
+    # Stronger decoder helps capacity
     dec = Decoder(L=cfg.L, hidden=256).to(device)
 
-    # Separate LR (optional but helpful): decoder learns a bit faster
+    # Separate LR: decoder learns faster (important)
     opt = torch.optim.Adam(
         [
             {"params": enc.parameters(), "lr": cfg.lr},
-            {"params": dec.parameters(), "lr": cfg.lr * 2.0},
+            {"params": dec.parameters(), "lr": cfg.lr * 3.0},  # was 2.0
         ]
     )
 
@@ -146,6 +150,10 @@ def main() -> None:
                 alpha = cfg.alpha_img_main
                 beta = cfg.beta_msg_main
                 lambda_delta = cfg.lambda_delta_main
+
+            # ---- later: boost message weight ----
+            if epoch_idx >= cfg.beta_boost_epoch:
+                beta = cfg.beta_msg_boost
 
             running_psnr = 0.0
             running_ber = 0.0
@@ -218,12 +226,14 @@ def main() -> None:
                         mb_mean = m_bits.mean().item()
                         delta_mean = delta.abs().mean().item()
 
+                    noise_val = cfg.noise_std if epoch_idx >= cfg.noise_after_epoch else 0.0
+
                     print(
                         f"[epoch {epoch_idx+1}/{cfg.epochs} step {n_steps}] "
                         f"loss={avg_loss:.4f} (Lmsg={avg_lmsg:.4f} Limg={avg_limg:.6f} Ld={avg_ldelta:.6f}) "
                         f"PSNR={avg_psnr:.2f} BER={avg_ber:.4f} acc={avg_acc:.4f} "
                         f"logits(mean/std)={logits_mean:.3f}/{logits_std:.3f} "
-                        f"(alpha={alpha:g}, beta={beta:g}, lambda_delta={lambda_delta:g}, noise={cfg.noise_std if epoch_idx>=cfg.noise_after_epoch else 0:g})"
+                        f"(alpha={alpha:g}, beta={beta:g}, lambda_delta={lambda_delta:g}, noise={noise_val:g})"
                     )
                     print(f"  m_bits.mean  : {mb_mean:.3f}    |delta|.mean : {delta_mean:.6f}")
 
