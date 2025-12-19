@@ -18,8 +18,9 @@ from utils.lsb import embed_bits_lsb
 
 @dataclass
 class Cfg:
-    n_digits: int = 8
-    L: int = 32
+    n_digits: int = 64   # 64 digits = 256 bits
+    L: int = 256
+
 
     batch_size: int = 256
     epochs: int = 5
