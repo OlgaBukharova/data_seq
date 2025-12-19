@@ -6,19 +6,19 @@ import torch.nn as nn
 
 
 class Encoder(nn.Module):
-    def __init__(self, L: int = 256, hidden: int = 96, eps: float = 0.10):
+    def __init__(self, L: int = 256, hidden: int = 96, eps: float = 0.20, gain: float = 10.0):
         """
         L: message bits length
-        hidden: base hidden channels
-        eps: embedding strength (max abs delta after tanh scaling)
+        eps: max embedding strength (after tanh scaling)
+        gain: amplifies raw_delta before tanh to avoid tiny deltas
         """
         super().__init__()
         self.L = L
         self.eps = float(eps)
+        self.gain = float(gain)
 
         in_ch = 3 + L
 
-        # Simple CNN that maps [B, 3+L, H, W] -> [B, 3, H, W]
         self.net = nn.Sequential(
             nn.Conv2d(in_ch, hidden, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -36,13 +36,14 @@ class Encoder(nn.Module):
         """
         B, _, H, W = x.shape
 
-        # Expand bits into a spatial map and concatenate
-        m_map = m_bits.view(B, self.L, 1, 1).expand(B, self.L, H, W)
+        # IMPORTANT: map bits {0,1} -> {-1,+1} so message has zero mean
+        m = m_bits * 2.0 - 1.0  # [B,L] in {-1,+1}
+        m_map = m.view(B, self.L, 1, 1).expand(B, self.L, H, W)
+
         inp = torch.cat([x, m_map], dim=1)
 
-        # Predict raw delta, then constrain and scale
-        raw_delta = self.net(inp)                 # [B,3,H,W]
-        delta = torch.tanh(raw_delta) * self.eps  # bounded, scaled
+        raw_delta = self.net(inp)                       # [B,3,H,W]
+        delta = torch.tanh(raw_delta * self.gain) * self.eps
 
         x_stego = torch.clamp(x + delta, -1, 1)
 
