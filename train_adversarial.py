@@ -42,14 +42,14 @@ class Cfg:
     alpha: float = 1.0     # image MSE on (x_stego vs x)
     beta: float = 9.0      # message BCE on (Dec(channel(x_stego)) vs bits)
     gamma_start: float = 0.0   # adv weight ramp
-    gamma_end: float = 0.30
-    gamma_warm_epochs: int = 2  # epochs where gamma ramps up
+    gamma_end: float = 1.00
+    gamma_warm_epochs: int = 4  # epochs where gamma ramps up
 
     lam_delta: float = 0.001
 
     # how often to train D relative to G
     d_steps: int = 1
-    g_steps: int = 1
+    g_steps: int = 2
 
     # channel (same as step 3)
     ch: ChannelCfg = field(default_factory=lambda: ChannelCfg(
@@ -188,8 +188,8 @@ def main():
                 opt_d.zero_grad(set_to_none=True)
 
                 with torch.no_grad():
-                    x_stego = enc(x, m_bits)  # stego generation (no grad)
-                # D sees clean vs stego (no channel here обычно сильнее; можно добавить channel позже)
+                    x_stego = enc(x, m_bits)
+                    x_stego = apply_channel(x_stego, cfg.ch)  # <-- добавили
                 x_mix = torch.cat([x, x_stego], dim=0)
                 y_mix = torch.cat([
                     torch.zeros(B, device=device),
