@@ -1,4 +1,3 @@
-# models/encoder.py
 from __future__ import annotations
 import torch
 import torch.nn as nn
@@ -20,9 +19,10 @@ class _ResBlock(nn.Module):
 
 class Encoder(nn.Module):
     """
-    Encoder: X [B,3,32,32] + bits M [B,L] -> X' in [-1,1]
-    Делает delta через CNN, затем tanh * eps, потом clamp(x+delta).
+    Encoder: X [B,3,32,32] + bits [B,L] -> X' in [-1,1]
+    Делает delta = tanh(head(...))*eps, затем x' = clamp(x+delta).
     """
+
     def __init__(self, L: int, hidden: int = 96, eps: float = 0.25):
         super().__init__()
         self.L = int(L)
@@ -36,16 +36,14 @@ class Encoder(nn.Module):
             _ResBlock(hidden),
             _ResBlock(hidden),
         )
-
         self.mid = nn.Sequential(
             nn.Conv2d(hidden, hidden, 3, padding=1),
             nn.ReLU(inplace=True),
             _ResBlock(hidden),
         )
-
         self.head = nn.Conv2d(hidden, 3, 1)
 
-        # маленькая инициализация головы, чтобы старт был стабильнее
+        # стабильный старт: начинаем с near-zero delta
         nn.init.zeros_(self.head.weight)
         nn.init.zeros_(self.head.bias)
 
@@ -53,19 +51,13 @@ class Encoder(nn.Module):
         self.eps = float(eps)
 
     def forward(self, x: torch.Tensor, m_bits: torch.Tensor, return_delta: bool = False):
-        """
-        x: [B,3,H,W] in [-1,1]
-        m_bits: [B,L] float {0,1}
-        """
         B, _, H, W = x.shape
 
         # {0,1} -> {-1,+1}
         m = m_bits * 2.0 - 1.0
         m_map = m.view(B, self.L, 1, 1).expand(B, self.L, H, W)
 
-        inp = torch.cat([x, m_map], dim=1)
-
-        h = self.stem(inp)
+        h = self.stem(torch.cat([x, m_map], dim=1))
         h = self.mid(h)
         raw = self.head(h)
 

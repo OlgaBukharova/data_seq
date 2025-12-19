@@ -1,4 +1,3 @@
-# decode.py
 from __future__ import annotations
 
 import argparse
@@ -12,25 +11,22 @@ from utils.bits import logits_to_bits, bits_to_digits
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--image", type=str, required=True, help="Path to stego image")
-    parser.add_argument("--ckpt", type=str, required=True, help="Checkpoint path")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--image", type=str, required=True, help="Path to stego image")
+    p.add_argument("--ckpt", type=str, required=True, help="Checkpoint path")
+    args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- image ---
     tfm = transforms.Compose([
         transforms.Resize((32, 32)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=(0.5, 0.5, 0.5),
-                             std=(0.5, 0.5, 0.5)),
+        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
     ])
 
     img = Image.open(args.image).convert("RGB")
     x = tfm(img).unsqueeze(0).to(device)
 
-    # --- model ---
     ckpt = torch.load(args.ckpt, map_location=device)
     dec = Decoder(L=32, hidden=160).to(device)
     dec.load_state_dict(ckpt["decoder"])

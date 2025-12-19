@@ -1,4 +1,3 @@
-# models/decoder.py
 from __future__ import annotations
 import torch
 import torch.nn as nn
@@ -7,8 +6,9 @@ import torch.nn as nn
 class Decoder(nn.Module):
     """
     Decoder: X' [B,3,32,32] -> logits [B,L]
-    Возвращает ЛОГИТЫ (без sigmoid) для BCEWithLogitsLoss.
+    Возвращает logits (без sigmoid) для BCEWithLogitsLoss.
     """
+
     def __init__(self, L: int, hidden: int = 160):
         super().__init__()
         self.L = int(L)

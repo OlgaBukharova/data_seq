@@ -1,4 +1,3 @@
-# utils/payload.py
 from __future__ import annotations
 
 import random
@@ -22,10 +21,10 @@ def make_random_digit_batch(
     """
     Returns:
       bits: float32 tensor [B, L] with {0,1}, where L = n_digits*4 (BCD)
-      texts: list[str] of length B
+      texts: list[str] length B
     """
     texts: List[str] = [random_digit_string(n_digits) for _ in range(batch_size)]
-    bits = digits_to_bits(texts, n_digits=n_digits)  # [B, L] float32 on CPU
+    bits = digits_to_bits(texts, n_digits=n_digits)  # [B, L] float32 (CPU)
     if device is not None:
         bits = bits.to(device)
     return bits, texts
