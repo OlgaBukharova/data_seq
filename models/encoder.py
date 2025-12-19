@@ -4,45 +4,72 @@ import torch
 import torch.nn as nn
 
 
+class _ResBlock(nn.Module):
+    def __init__(self, c: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(c, c, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c, c, 3, padding=1),
+        )
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(x + self.net(x))
+
+
 class Encoder(nn.Module):
     """
-    Encoder(A): takes image X [B,3,32,32] and message bits M [B,L],
-    outputs stego image X' [B,3,32,32] in [-1, 1].
-
-    Key: single tanh + eps scaling (no tanh inside net).
-    eps is adjustable from train.py via set_eps() for bootstrap scheduling.
+    Encoder: X [B,3,32,32] + bits M [B,L] -> X' in [-1,1]
+    Делает delta через CNN, затем tanh * eps, потом clamp(x+delta).
     """
-    def __init__(self, L: int, hidden: int = 64, eps: float = 0.20):
+    def __init__(self, L: int, hidden: int = 96, eps: float = 0.25):
         super().__init__()
         self.L = int(L)
         self.eps = float(eps)
+
         in_ch = 3 + self.L
 
-        self.net = nn.Sequential(
+        self.stem = nn.Sequential(
             nn.Conv2d(in_ch, hidden, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(hidden, hidden, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden, hidden, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden, 3, 1),
+            _ResBlock(hidden),
+            _ResBlock(hidden),
         )
+
+        self.mid = nn.Sequential(
+            nn.Conv2d(hidden, hidden, 3, padding=1),
+            nn.ReLU(inplace=True),
+            _ResBlock(hidden),
+        )
+
+        self.head = nn.Conv2d(hidden, 3, 1)
+
+        # маленькая инициализация головы, чтобы старт был стабильнее
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
 
     def set_eps(self, eps: float) -> None:
         self.eps = float(eps)
 
     def forward(self, x: torch.Tensor, m_bits: torch.Tensor, return_delta: bool = False):
+        """
+        x: [B,3,H,W] in [-1,1]
+        m_bits: [B,L] float {0,1}
+        """
         B, _, H, W = x.shape
 
-        # map bits {0,1} -> {-1,+1} and broadcast to spatial map
+        # {0,1} -> {-1,+1}
         m = m_bits * 2.0 - 1.0
         m_map = m.view(B, self.L, 1, 1).expand(B, self.L, H, W)
 
         inp = torch.cat([x, m_map], dim=1)
 
-        raw_delta = self.net(inp)
-        delta = torch.tanh(raw_delta) * self.eps
+        h = self.stem(inp)
+        h = self.mid(h)
+        raw = self.head(h)
 
+        delta = torch.tanh(raw) * self.eps
         x_stego = torch.clamp(x + delta, -1, 1)
 
         if return_delta:

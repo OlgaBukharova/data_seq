@@ -1,37 +1,31 @@
-# Генерация сообщений для обучения:
-# случайные строки
-# или сразу случайные биты
-
 # utils/payload.py
 from __future__ import annotations
 
 import random
-import string
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
-from utils.bits import make_batch_from_strings
+from utils.bits import digits_to_bits
 
 
-def random_ascii_string(n_chars: int) -> str:
-    alphabet = string.ascii_letters + string.digits + " _-.,;:!?@#$%&*()[]{}"
-    return "".join(random.choice(alphabet) for _ in range(n_chars))
+def random_digit_string(n_digits: int) -> str:
+    return "".join(str(random.randint(0, 9)) for _ in range(n_digits))
 
 
-def make_random_string_batch(
+def make_random_digit_batch(
     batch_size: int,
-    n_chars: int,
     *,
-    L: int,
+    n_digits: int,
     device: Optional[torch.device] = None,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, List[str]]:
     """
     Returns:
-      bits: float32 tensor [B, L] with {0,1} values
+      bits: float32 tensor [B, L] with {0,1}, where L = n_digits*4 (BCD)
+      texts: list[str] of length B
     """
-    texts: List[str] = [random_ascii_string(n_chars) for _ in range(batch_size)]
-    bits = make_batch_from_strings(texts, L)  # [B, L] float32 on CPU
+    texts: List[str] = [random_digit_string(n_digits) for _ in range(batch_size)]
+    bits = digits_to_bits(texts, n_digits=n_digits)  # [B, L] float32 on CPU
     if device is not None:
         bits = bits.to(device)
     return bits, texts
