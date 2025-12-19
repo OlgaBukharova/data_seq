@@ -13,16 +13,16 @@ import torchvision.transforms as transforms
 
 from models.encoder import Encoder
 from models.decoder import Decoder
-from utils.payload import make_random_string_batch
 from utils.metrics import psnr, ber_from_logits
 from utils.bits import bits_to_string, threshold_logits_to_bits
+from utils.payload import make_random_string_batch
 
 
 @dataclass
 class TrainConfig:
     # Message / data
     L: int = 256                 # message bits
-    n_chars: int = 8             # random ASCII chars per sample (for demo)
+    n_chars: int = 8             # random ASCII chars per sample (for demo only)
     batch_size: int = 128
     num_workers: int = 2
 
@@ -31,17 +31,15 @@ class TrainConfig:
     lr: float = 3e-4
 
     # === Loss weights (curriculum) ===
-    # Warmup: force learning message first
-    warmup_epochs: int = 5       # was 3; longer warmup prevents "encoder collapse"
+    warmup_epochs: int = 5
     alpha_img_warmup: float = 0.1
     beta_msg_warmup: float = 10.0
 
-    # Main stage: keep message important enough (do NOT drop beta too low)
-    alpha_img_main: float = 0.5   # was 1.0; softer image pressure
-    beta_msg_main: float = 6.0    # was 2.0; stronger message pressure
+    alpha_img_main: float = 0.5
+    beta_msg_main: float = 6.0
 
-    # Regularize encoder delta (too big -> distort; too big lambda -> delta->0 and PSNR->∞)
-    lambda_delta: float = 0.005   # was 0.02; weaker so encoder doesn't "turn off"
+    # Regularize encoder delta (too big -> distort; too big lambda -> delta->0)
+    lambda_delta: float = 0.005
 
     # Logging / saving
     log_every_steps: int = 200
@@ -80,6 +78,14 @@ def save_checkpoint(
         },
         path,
     )
+
+
+def make_balanced_random_bits(batch_size: int, L: int, device: torch.device) -> torch.Tensor:
+    """
+    Balanced random {0,1} bits with P(1)=0.5.
+    Shape: [B, L], dtype float.
+    """
+    return torch.randint(0, 2, (batch_size, L), device=device).float()
 
 
 def main() -> None:
@@ -127,7 +133,7 @@ def main() -> None:
 
     try:
         for epoch_idx in range(cfg.epochs):
-            # ===== curriculum weights (IMPORTANT: inside epoch loop) =====
+            # ===== curriculum weights (inside epoch loop) =====
             if epoch_idx < cfg.warmup_epochs:
                 alpha = cfg.alpha_img_warmup
                 beta = cfg.beta_msg_warmup
@@ -145,13 +151,12 @@ def main() -> None:
                 n_steps += 1
                 x = x.to(device, non_blocking=True)  # [B,3,32,32] in [-1,1]
 
-                # Random payload bits (and demo strings)
-                m_bits, texts = make_random_string_batch(
-                    batch_size=x.size(0),
-                    n_chars=cfg.n_chars,
-                    L=cfg.L,
-                    device=device,
-                )  # m_bits: [B,L] float {0,1}
+                # ============================================================
+                # TRAINING PAYLOAD (FIX): use BALANCED random bits (p=0.5)
+                # This prevents m_bits.mean drifting to ~0.12 and the model
+                # learning to always predict zeros.
+                # ============================================================
+                m_bits = make_balanced_random_bits(x.size(0), cfg.L, device=device)
 
                 # Forward
                 x_stego, delta = enc(x, m_bits, return_delta=True)
@@ -160,7 +165,7 @@ def main() -> None:
                 # Losses
                 Limg = loss_img_fn(x_stego, x)
                 Lmsg = loss_msg_fn(logits, m_bits)
-                Ldelta = delta.abs().mean()  # stable delta penalty
+                Ldelta = delta.abs().mean()
 
                 loss = alpha * Limg + beta * Lmsg + cfg.lambda_delta * Ldelta
 
@@ -180,7 +185,7 @@ def main() -> None:
                     running_acc += bit_acc
                     running_loss += loss.item()
 
-                # Logging
+                # Logging / demo
                 if n_steps % cfg.log_every_steps == 0:
                     avg_psnr = running_psnr / n_steps
                     avg_ber = running_ber / n_steps
@@ -188,14 +193,8 @@ def main() -> None:
                     avg_loss = running_loss / n_steps
 
                     with torch.no_grad():
-                        demo_bits = threshold_logits_to_bits(logits[0]).float()
-                        demo_ber = (demo_bits != m_bits[0]).float().mean().item()
-                        decoded = bits_to_string(demo_bits)
-
                         logits_mean = logits.mean().item()
                         logits_std = logits.std().item()
-
-                        # Extra diagnostics (helps detect encoder collapse / payload bias)
                         mb_mean = m_bits.mean().item()
                         delta_mean = delta.abs().mean().item()
 
@@ -207,10 +206,22 @@ def main() -> None:
                         f"(alpha={alpha:g}, beta={beta:g}, lambda_delta={cfg.lambda_delta:g})"
                     )
                     print(f"  m_bits.mean  : {mb_mean:.3f}    |delta|.mean : {delta_mean:.6f}")
+
+                    # Optional: show a "string demo" (not used for training)
+                    demo_bits, demo_texts = make_random_string_batch(
+                        batch_size=1, n_chars=cfg.n_chars, L=cfg.L, device=device
+                    )
+                    # Encode/decode that one sample (use current model)
+                    x0 = x[:1]
+                    x0_stego, _ = enc(x0, demo_bits, return_delta=True)
+                    demo_logits = dec(x0_stego)
+                    demo_out_bits = threshold_logits_to_bits(demo_logits[0]).float()
+                    demo_ber = (demo_out_bits != demo_bits[0]).float().mean().item()
+                    decoded = bits_to_string(demo_out_bits)
+
                     print(f"  demo BER     : {demo_ber:.4f}")
                     print(f"  demo decoded : {decoded!r}")
-                    if texts is not None:
-                        print(f"  demo target  : {texts[0]!r}")
+                    print(f"  demo target  : {demo_texts[0]!r}")
 
             # End of epoch summary
             avg_psnr = running_psnr / max(1, n_steps)
