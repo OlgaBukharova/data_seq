@@ -34,18 +34,22 @@ def embed_bits_lsb(x: torch.Tensor, bits: torch.Tensor) -> torch.Tensor:
     B, _, H, W = x.shape
     L = bits.size(1)
     assert bits.size(0) == B
-    assert L <= H * W, "LSB baseline uses 1 bit per pixel (blue channel). Increase capacity if needed."
+    assert L <= H * W, "LSB baseline uses 1 bit per pixel (blue channel)."
 
     xu8 = _to_uint8(x).clone()
-    b = xu8[:, 2, :, :].reshape(B, H * W)  # blue channel flat
 
-    bits_i = (bits > 0.5).to(torch.uint8)  # [B,L] 0/1
+    # take BLUE as an independent tensor (no views into xu8)
+    blue = xu8[:, 2, :, :].clone()              # [B,H,W] safe
+    flat = blue.reshape(B, H * W).clone()       # [B,HW] safe
 
-    # clear LSB and set
-    b[:, :L] = (b[:, :L] & 0xFE) | bits_i
+    bits_i = (bits > 0.5).to(torch.uint8)       # [B,L] 0/1
+    flat[:, :L] = (flat[:, :L] & 0xFE) | bits_i
 
-    xu8[:, 2, :, :] = b.reshape(B, H, W)
+    # write back using a fresh tensor
+    xu8[:, 2, :, :] = flat.reshape(B, H, W).contiguous()
+
     return _to_float_minus1_1(xu8)
+
 
 
 def extract_bits_lsb(x_stego: torch.Tensor, L: int) -> torch.Tensor:
