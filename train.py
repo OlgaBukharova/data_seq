@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import math
 import time
 from dataclasses import dataclass
 
@@ -23,7 +22,7 @@ from utils.bits import bits_to_string, threshold_logits_to_bits
 class TrainConfig:
     # Message / data
     L: int = 256                 # message bits
-    n_chars: int = 8             # for demo strings (fits into L if encoding is truncating/padding)
+    n_chars: int = 8             # random ASCII chars per sample (for demo)
     batch_size: int = 128
     num_workers: int = 2
 
@@ -31,15 +30,18 @@ class TrainConfig:
     epochs: int = 15
     lr: float = 3e-4
 
-    # Loss weights (curriculum)
+    # === Loss weights (curriculum) ===
+    # Warmup: force learning message first
+    warmup_epochs: int = 5       # was 3; longer warmup prevents "encoder collapse"
     alpha_img_warmup: float = 0.1
     beta_msg_warmup: float = 10.0
-    warmup_epochs: int = 3
 
-    alpha_img_main: float = 1.0
-    beta_msg_main: float = 2.0
+    # Main stage: keep message important enough (do NOT drop beta too low)
+    alpha_img_main: float = 0.5   # was 1.0; softer image pressure
+    beta_msg_main: float = 6.0    # was 2.0; stronger message pressure
 
-    lambda_delta: float = 0.02   # regularize magnitude of delta (encoder change)
+    # Regularize encoder delta (too big -> distort; too big lambda -> delta->0 and PSNR->∞)
+    lambda_delta: float = 0.005   # was 0.02; weaker so encoder doesn't "turn off"
 
     # Logging / saving
     log_every_steps: int = 200
@@ -114,19 +116,18 @@ def main() -> None:
 
     opt = torch.optim.Adam(list(enc.parameters()) + list(dec.parameters()), lr=cfg.lr)
 
+    # Losses
     loss_img_fn = nn.MSELoss()
     loss_msg_fn = nn.BCEWithLogitsLoss()
 
     enc.train()
     dec.train()
 
-    global_step = 0
     start_time = time.time()
 
     try:
-        # epoch_idx is 0-based here (important for curriculum)
         for epoch_idx in range(cfg.epochs):
-            # ---- curriculum weights (MUST be inside epoch loop) ----
+            # ===== curriculum weights (IMPORTANT: inside epoch loop) =====
             if epoch_idx < cfg.warmup_epochs:
                 alpha = cfg.alpha_img_warmup
                 beta = cfg.beta_msg_warmup
@@ -141,13 +142,10 @@ def main() -> None:
             n_steps = 0
 
             for x, _ in train_loader:
-                global_step += 1
                 n_steps += 1
-
                 x = x.to(device, non_blocking=True)  # [B,3,32,32] in [-1,1]
 
-                # Message bits: either random bits OR random strings -> bits.
-                # Strings are useful for demo printing.
+                # Random payload bits (and demo strings)
                 m_bits, texts = make_random_string_batch(
                     batch_size=x.size(0),
                     n_chars=cfg.n_chars,
@@ -157,12 +155,12 @@ def main() -> None:
 
                 # Forward
                 x_stego, delta = enc(x, m_bits, return_delta=True)
-                logits = dec(x_stego)  # logits [B,L] (NO sigmoid inside decoder)
+                logits = dec(x_stego)  # logits [B,L] (decoder must NOT sigmoid)
 
                 # Losses
                 Limg = loss_img_fn(x_stego, x)
                 Lmsg = loss_msg_fn(logits, m_bits)
-                Ldelta = delta.abs().mean()
+                Ldelta = delta.abs().mean()  # stable delta penalty
 
                 loss = alpha * Limg + beta * Lmsg + cfg.lambda_delta * Ldelta
 
@@ -175,8 +173,6 @@ def main() -> None:
                 with torch.no_grad():
                     batch_psnr = psnr(x, x_stego)
                     batch_ber = ber_from_logits(logits, m_bits)
-
-                    # bit accuracy using logits threshold at 0 (matches BCEWithLogitsLoss)
                     bit_acc = ((logits > 0).float() == m_bits).float().mean().item()
 
                     running_psnr += batch_psnr
@@ -199,19 +195,24 @@ def main() -> None:
                         logits_mean = logits.mean().item()
                         logits_std = logits.std().item()
 
+                        # Extra diagnostics (helps detect encoder collapse / payload bias)
+                        mb_mean = m_bits.mean().item()
+                        delta_mean = delta.abs().mean().item()
+
                     print(
                         f"[epoch {epoch_idx+1}/{cfg.epochs} step {n_steps}] "
                         f"loss={avg_loss:.4f} PSNR={avg_psnr:.2f} "
                         f"BER={avg_ber:.4f} acc={avg_acc:.4f} "
                         f"logits(mean/std)={logits_mean:.3f}/{logits_std:.3f} "
-                        f"(alpha={alpha:g}, beta={beta:g})"
+                        f"(alpha={alpha:g}, beta={beta:g}, lambda_delta={cfg.lambda_delta:g})"
                     )
+                    print(f"  m_bits.mean  : {mb_mean:.3f}    |delta|.mean : {delta_mean:.6f}")
                     print(f"  demo BER     : {demo_ber:.4f}")
                     print(f"  demo decoded : {decoded!r}")
                     if texts is not None:
                         print(f"  demo target  : {texts[0]!r}")
 
-            # End of epoch
+            # End of epoch summary
             avg_psnr = running_psnr / max(1, n_steps)
             avg_ber = running_ber / max(1, n_steps)
             avg_acc = running_acc / max(1, n_steps)
@@ -235,7 +236,7 @@ def main() -> None:
                 )
                 print("Saved:", ckpt_path)
 
-        # Final save (convenience)
+        # Final save
         final_path = os.path.join(cfg.save_dir, "stego_ed_final.pt")
         save_checkpoint(
             final_path,
@@ -248,7 +249,6 @@ def main() -> None:
         print("Saved:", final_path)
 
     except KeyboardInterrupt:
-        # Save emergency checkpoint
         print("\nKeyboardInterrupt: saving emergency checkpoint...")
         emergency_path = os.path.join(cfg.save_dir, "stego_ed_interrupt.pt")
         save_checkpoint(
