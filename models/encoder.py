@@ -5,18 +5,13 @@ import torch.nn as nn
 
 
 class Encoder(nn.Module):
-    """
-    Encoder(A): takes image X [B,3,H,W] in [-1,1] and message bits M [B,L] (0/1),
-    outputs stego image X' [B,3,H,W] in [-1,1].
-    """
-    def __init__(self, L: int, hidden: int = 64, eps: float = 0.10):
+    def __init__(self, L: int, hidden: int = 64, eps: float = 0.20):
         super().__init__()
         self.L = L
         self.eps = float(eps)
         in_ch = 3 + L
 
-        # IMPORTANT:
-        # - No Tanh here. We will apply tanh * eps once at the end.
+        # ВАЖНО: без nn.Tanh() здесь
         self.net = nn.Sequential(
             nn.Conv2d(in_ch, hidden, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -24,13 +19,13 @@ class Encoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden, hidden, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(hidden, 3, 1),  # raw delta (unbounded)
+            nn.Conv2d(hidden, 3, 1),
         )
 
     def forward(self, x: torch.Tensor, m_bits: torch.Tensor, return_delta: bool = False):
         B, _, H, W = x.shape
 
-        # Better conditioning: map bits {0,1} -> {-1,+1}
+        # лучше: {0,1} -> {-1,+1}
         m = m_bits * 2.0 - 1.0
         m_map = m.view(B, self.L, 1, 1).expand(B, self.L, H, W)
 

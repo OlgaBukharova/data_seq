@@ -36,15 +36,15 @@ class TrainConfig:
 
     alpha_img_main: float = 0.5
     beta_msg_main: float = 10.0
-    lambda_delta_main: float = 0.002
+    lambda_delta_main: float = 0.0005
 
     # Later: press harder on message after decoder "wakes up"
     beta_boost_epoch: int = 8
     beta_msg_boost: float = 15.0
 
     # Channel noise (helps decoder learn faster / more robustly)
-    noise_std: float = 0.02
-    noise_after_epoch: int = 2
+    noise_after_epoch = 6
+    noise_std = 0.02
 
     # Logging / saving
     log_every_steps: int = 200
