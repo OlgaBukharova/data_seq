@@ -6,14 +6,17 @@ import torch.nn as nn
 
 class Encoder(nn.Module):
     """
-    Encoder(A): takes image X [B,3,32,32] and message bits M [B,L],
-    outputs stego image X' [B,3,32,32] in [-1, 1].
+    Encoder(A): takes image X [B,3,H,W] in [-1,1] and message bits M [B,L] (0/1),
+    outputs stego image X' [B,3,H,W] in [-1,1].
     """
-    def __init__(self, L: int, hidden: int = 64):
+    def __init__(self, L: int, hidden: int = 64, eps: float = 0.10):
         super().__init__()
         self.L = L
+        self.eps = float(eps)
         in_ch = 3 + L
 
+        # IMPORTANT:
+        # - No Tanh here. We will apply tanh * eps once at the end.
         self.net = nn.Sequential(
             nn.Conv2d(in_ch, hidden, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -21,18 +24,23 @@ class Encoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden, hidden, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(hidden, 3, 1),  # predict delta
-            nn.Tanh(),
+            nn.Conv2d(hidden, 3, 1),  # raw delta (unbounded)
         )
 
-    def forward(self, x, m_bits, return_delta: bool = False):
+    def forward(self, x: torch.Tensor, m_bits: torch.Tensor, return_delta: bool = False):
         B, _, H, W = x.shape
-        m_map = m_bits.view(B, self.L, 1, 1).repeat(1, 1, H, W)
+
+        # Better conditioning: map bits {0,1} -> {-1,+1}
+        m = m_bits * 2.0 - 1.0
+        m_map = m.view(B, self.L, 1, 1).expand(B, self.L, H, W)
+
         inp = torch.cat([x, m_map], dim=1)
-        delta = 0.20 * self.net(inp)
-        eps = 0.05  # стартовое значение
-        delta = torch.tanh(delta) * eps
+
+        raw_delta = self.net(inp)
+        delta = torch.tanh(raw_delta) * self.eps
+
         x_stego = torch.clamp(x + delta, -1, 1)
+
         if return_delta:
             return x_stego, delta
         return x_stego

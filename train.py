@@ -14,15 +14,12 @@ import torchvision.transforms as transforms
 from models.encoder import Encoder
 from models.decoder import Decoder
 from utils.metrics import psnr, ber_from_logits
-from utils.bits import bits_to_string, threshold_logits_to_bits
-from utils.payload import make_random_string_batch
 
 
 @dataclass
 class TrainConfig:
     # Message / data
-    L: int = 256                 # message bits
-    n_chars: int = 8             # random ASCII chars per sample (for demo only)
+    L: int = 256
     batch_size: int = 128
     num_workers: int = 2
 
@@ -30,16 +27,15 @@ class TrainConfig:
     epochs: int = 15
     lr: float = 3e-4
 
-    # === Loss weights (curriculum) ===
-    warmup_epochs: int = 5
+    # Curriculum
+    warmup_epochs: int = 3
     alpha_img_warmup: float = 0.1
     beta_msg_warmup: float = 10.0
 
     alpha_img_main: float = 0.5
     beta_msg_main: float = 6.0
 
-    # Regularize encoder delta (too big -> distort; too big lambda -> delta->0)
-    lambda_delta: float = 0.005
+    lambda_delta: float = 0.002  # slightly weaker than 0.005 (prevents collapse)
 
     # Logging / saving
     log_every_steps: int = 200
@@ -80,14 +76,6 @@ def save_checkpoint(
     )
 
 
-def make_balanced_random_bits(batch_size: int, L: int, device: torch.device) -> torch.Tensor:
-    """
-    Balanced random {0,1} bits with P(1)=0.5.
-    Shape: [B, L], dtype float.
-    """
-    return torch.randint(0, 2, (batch_size, L), device=device).float()
-
-
 def main() -> None:
     cfg = TrainConfig()
 
@@ -97,16 +85,14 @@ def main() -> None:
     set_seed(cfg.seed)
     ensure_dir(cfg.save_dir)
 
-    # Data: CIFAR10 normalized to [-1,1]
+    # CIFAR10 normalized to [-1,1]
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
             transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
         ]
     )
-    train_ds = torchvision.datasets.CIFAR10(
-        root="./data", train=True, download=True, transform=transform
-    )
+    train_ds = torchvision.datasets.CIFAR10(root="./data", train=True, download=True, transform=transform)
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.batch_size,
@@ -117,12 +103,11 @@ def main() -> None:
     )
 
     # Models
-    enc = Encoder(L=cfg.L, hidden=96).to(device)
+    enc = Encoder(L=cfg.L, hidden=64, eps=0.10).to(device)
     dec = Decoder(L=cfg.L, hidden=128).to(device)
 
     opt = torch.optim.Adam(list(enc.parameters()) + list(dec.parameters()), lr=cfg.lr)
 
-    # Losses
     loss_img_fn = nn.MSELoss()
     loss_msg_fn = nn.BCEWithLogitsLoss()
 
@@ -133,7 +118,6 @@ def main() -> None:
 
     try:
         for epoch_idx in range(cfg.epochs):
-            # ===== curriculum weights (inside epoch loop) =====
             if epoch_idx < cfg.warmup_epochs:
                 alpha = cfg.alpha_img_warmup
                 beta = cfg.beta_msg_warmup
@@ -149,32 +133,24 @@ def main() -> None:
 
             for x, _ in train_loader:
                 n_steps += 1
-                x = x.to(device, non_blocking=True)  # [B,3,32,32] in [-1,1]
+                x = x.to(device, non_blocking=True)
 
-                # ============================================================
-                # TRAINING PAYLOAD (FIX): use BALANCED random bits (p=0.5)
-                # This prevents m_bits.mean drifting to ~0.12 and the model
-                # learning to always predict zeros.
-                # ============================================================
-                m_bits = make_balanced_random_bits(x.size(0), cfg.L, device=device)
+                # Balanced random bits (p=0.5)
+                m_bits = torch.randint(0, 2, (x.size(0), cfg.L), device=device).float()
 
-                # Forward
                 x_stego, delta = enc(x, m_bits, return_delta=True)
-                logits = dec(x_stego)  # logits [B,L] (decoder must NOT sigmoid)
+                logits = dec(x_stego)
 
-                # Losses
                 Limg = loss_img_fn(x_stego, x)
                 Lmsg = loss_msg_fn(logits, m_bits)
                 Ldelta = delta.abs().mean()
 
                 loss = alpha * Limg + beta * Lmsg + cfg.lambda_delta * Ldelta
 
-                # Backprop
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 opt.step()
 
-                # Metrics
                 with torch.no_grad():
                     batch_psnr = psnr(x, x_stego)
                     batch_ber = ber_from_logits(logits, m_bits)
@@ -185,7 +161,6 @@ def main() -> None:
                     running_acc += bit_acc
                     running_loss += loss.item()
 
-                # Logging / demo
                 if n_steps % cfg.log_every_steps == 0:
                     avg_psnr = running_psnr / n_steps
                     avg_ber = running_ber / n_steps
@@ -207,56 +182,20 @@ def main() -> None:
                     )
                     print(f"  m_bits.mean  : {mb_mean:.3f}    |delta|.mean : {delta_mean:.6f}")
 
-                    # Optional: show a "string demo" (not used for training)
-                    demo_bits, demo_texts = make_random_string_batch(
-                        batch_size=1, n_chars=cfg.n_chars, L=cfg.L, device=device
-                    )
-                    # Encode/decode that one sample (use current model)
-                    x0 = x[:1]
-                    x0_stego, _ = enc(x0, demo_bits, return_delta=True)
-                    demo_logits = dec(x0_stego)
-                    demo_out_bits = threshold_logits_to_bits(demo_logits[0]).float()
-                    demo_ber = (demo_out_bits != demo_bits[0]).float().mean().item()
-                    decoded = bits_to_string(demo_out_bits)
-
-                    print(f"  demo BER     : {demo_ber:.4f}")
-                    print(f"  demo decoded : {decoded!r}")
-                    print(f"  demo target  : {demo_texts[0]!r}")
-
-            # End of epoch summary
             avg_psnr = running_psnr / max(1, n_steps)
             avg_ber = running_ber / max(1, n_steps)
             avg_acc = running_acc / max(1, n_steps)
             avg_loss = running_loss / max(1, n_steps)
 
-            print(
-                f"Epoch {epoch_idx+1}: loss={avg_loss:.4f} PSNR={avg_psnr:.2f} "
-                f"BER={avg_ber:.4f} acc={avg_acc:.4f}"
-            )
+            print(f"Epoch {epoch_idx+1}: loss={avg_loss:.4f} PSNR={avg_psnr:.2f} BER={avg_ber:.4f} acc={avg_acc:.4f}")
 
-            # Save checkpoint
             if (epoch_idx + 1) % cfg.save_every_epochs == 0:
                 ckpt_path = os.path.join(cfg.save_dir, f"stego_ed_epoch{epoch_idx+1}.pt")
-                save_checkpoint(
-                    ckpt_path,
-                    enc=enc,
-                    dec=dec,
-                    opt=opt,
-                    epoch_idx=epoch_idx,
-                    cfg=cfg,
-                )
+                save_checkpoint(ckpt_path, enc=enc, dec=dec, opt=opt, epoch_idx=epoch_idx, cfg=cfg)
                 print("Saved:", ckpt_path)
 
-        # Final save
         final_path = os.path.join(cfg.save_dir, "stego_ed_final.pt")
-        save_checkpoint(
-            final_path,
-            enc=enc,
-            dec=dec,
-            opt=opt,
-            epoch_idx=cfg.epochs - 1,
-            cfg=cfg,
-        )
+        save_checkpoint(final_path, enc=enc, dec=dec, opt=opt, epoch_idx=cfg.epochs - 1, cfg=cfg)
         print("Saved:", final_path)
 
     except KeyboardInterrupt:
