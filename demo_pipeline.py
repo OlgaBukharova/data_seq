@@ -37,9 +37,9 @@ class DemoCfg:
 
     # Channel used in demo
     ch: ChannelCfg = field(default_factory=lambda: ChannelCfg(
-        p_noise=0.50, noise_std=0.03,
-        p_resize=0.30, resize_min=0.60, resize_max=1.00,
-        p_crop=0.30, crop_min=0.70, crop_max=1.00,
+        p_noise=0.35, noise_std=0.02,
+        p_resize=0.20, resize_min=0.80, resize_max=1.00,
+        p_crop=0.15, crop_min=0.85, crop_max=1.00,
     ))
 
     # Visual
