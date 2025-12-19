@@ -24,21 +24,21 @@ class Cfg:
     L: int = 32
 
     batch_size: int = 256
-    epochs: int = 12
+    epochs: int = 18
     lr: float = 2e-4
 
     # Curriculum (быстро учим декодировать, потом улучшаем незаметность)
-    warm_epochs: int = 3
+    warm_epochs: int = 4
 
     eps_warm: float = 0.55     # больше сигнал в начале
-    eps_main: float = 0.25     # потом ужимаем
+    eps_main: float = 0.20     # потом ужимаем
 
     alpha_warm: float = 0.05   # вес MSE (малый)
     beta_warm: float = 30.0    # вес сообщения (большой)
     lam_warm: float = 0.0      # штраф на |delta| в начале выключен
 
-    alpha_main: float = 0.70
-    beta_main: float = 10.0
+    alpha_main: float = 1.00
+    beta_main: float = 9.0
     lam_main: float = 0.001
 
     # DataLoader
