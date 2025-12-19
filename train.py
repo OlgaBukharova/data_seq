@@ -18,35 +18,44 @@ from utils.metrics import psnr, ber_from_logits
 
 @dataclass
 class TrainConfig:
-    # Message / data
+    # Payload
     L: int = 128
     batch_size: int = 128
     num_workers: int = 2
 
     # Optimization
     epochs: int = 15
-    lr: float = 3e-4
+    lr_e: float = 3e-4
+    lr_d: float = 3e-4
 
-    # Two-phase training inside each batch
-    # 1) update decoder only (encoder frozen) for k steps
-    dec_only_steps: int = 1
+    # Bootstrap schedule to break BER=0.5 / PSNR huge collapse
+    # (epoch ranges are 0-based)
+    eps_stage0: float = 0.50   # epochs 0-1
+    eps_stage1: float = 0.25   # epochs 2-4
+    eps_stage2: float = 0.20   # epochs 5+
 
-    # Curriculum
-    warmup_epochs: int = 4
-    alpha_img_warmup: float = 0.05
-    beta_msg_warmup: float = 15.0
-    lambda_delta_warmup: float = 0.0
+    # Loss weights by stage
+    alpha0: float = 0.0        # do NOT penalize image at very start
+    beta0: float = 15.0
+    lam0: float = 0.0
 
-    alpha_img_main: float = 0.2
-    beta_msg_main: float = 15.0
-    lambda_delta_main: float = 0.0005
+    alpha1: float = 0.05
+    beta1: float = 15.0
+    lam1: float = 0.0
 
-    # Optional later boost
+    alpha2: float = 0.20
+    beta2: float = 15.0
+    lam2: float = 0.0005
+
+    # Optional later push on message
     beta_boost_epoch: int = 8
-    beta_msg_boost: float = 20.0
+    beta_boost: float = 20.0
 
-    # Channel noise (enable after decoder starts learning)
-    noise_after_epoch: int = 6
+    # Decoder warmup: extra decoder-only steps each batch (encoder frozen)
+    dec_only_steps: int = 2
+
+    # Channel noise: OFF until BER starts dropping (enable later manually)
+    noise_after_epoch: int = 999
     noise_std: float = 0.02
 
     # Logging / saving
@@ -54,7 +63,6 @@ class TrainConfig:
     save_dir: str = "checkpoints"
     save_every_epochs: int = 1
 
-    # Repro
     seed: int = 42
 
 
@@ -99,16 +107,24 @@ def set_requires_grad(model: nn.Module, flag: bool) -> None:
         p.requires_grad = flag
 
 
+def stage_params(cfg: TrainConfig, epoch_idx: int):
+    """Return (eps, alpha, beta, lambda_delta) for current epoch."""
+    if epoch_idx < 2:
+        return cfg.eps_stage0, cfg.alpha0, cfg.beta0, cfg.lam0
+    if epoch_idx < 5:
+        return cfg.eps_stage1, cfg.alpha1, cfg.beta1, cfg.lam1
+    return cfg.eps_stage2, cfg.alpha2, cfg.beta2, cfg.lam2
+
+
 def main() -> None:
     cfg = TrainConfig()
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
 
     set_seed(cfg.seed)
     ensure_dir(cfg.save_dir)
 
-    # Data: CIFAR10 normalized to [-1,1]
+    # Data: CIFAR10 -> [-1,1]
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -125,12 +141,12 @@ def main() -> None:
         pin_memory=(device.type == "cuda"),
     )
 
-    enc = Encoder(L=cfg.L, hidden=64).to(device)
+    enc = Encoder(L=cfg.L, hidden=64, eps=cfg.eps_stage0).to(device)
     dec = Decoder(L=cfg.L, hidden=256).to(device)
 
-    # Separate optimizers: decoder learns faster
-    opt_e = torch.optim.Adam(enc.parameters(), lr=cfg.lr)
-    opt_d = torch.optim.Adam(dec.parameters(), lr=cfg.lr * 5.0)  # strong decoder push
+    # Strong decoder LR helps it "wake up" fast
+    opt_e = torch.optim.Adam(enc.parameters(), lr=cfg.lr_e)
+    opt_d = torch.optim.Adam(dec.parameters(), lr=cfg.lr_d * 5.0)
 
     loss_img_fn = nn.MSELoss()
     loss_msg_fn = nn.BCEWithLogitsLoss()
@@ -142,18 +158,11 @@ def main() -> None:
 
     try:
         for epoch_idx in range(cfg.epochs):
-            # curriculum
-            if epoch_idx < cfg.warmup_epochs:
-                alpha = cfg.alpha_img_warmup
-                beta = cfg.beta_msg_warmup
-                lambda_delta = cfg.lambda_delta_warmup
-            else:
-                alpha = cfg.alpha_img_main
-                beta = cfg.beta_msg_main
-                lambda_delta = cfg.lambda_delta_main
+            eps, alpha, beta, lambda_delta = stage_params(cfg, epoch_idx)
+            enc.set_eps(eps)
 
             if epoch_idx >= cfg.beta_boost_epoch:
-                beta = cfg.beta_msg_boost
+                beta = cfg.beta_boost
 
             running_psnr = 0.0
             running_ber = 0.0
@@ -169,9 +178,9 @@ def main() -> None:
                 x = x.to(device, non_blocking=True)
                 m_bits = make_balanced_random_bits(x.size(0), cfg.L, device=device)
 
-                # -------------------------
-                # (A) Decoder-only step(s)
-                # -------------------------
+                # =========================
+                # (A) decoder-only warmup
+                # =========================
                 set_requires_grad(enc, False)
                 set_requires_grad(dec, True)
 
@@ -179,7 +188,7 @@ def main() -> None:
                     with torch.no_grad():
                         x_stego, _ = enc(x, m_bits, return_delta=True)
 
-                    # noise later
+                    # Noise OFF by default (enable later manually)
                     if epoch_idx >= cfg.noise_after_epoch and cfg.noise_std > 0:
                         x_stego_in = torch.clamp(x_stego + cfg.noise_std * torch.randn_like(x_stego), -1, 1)
                     else:
@@ -192,9 +201,9 @@ def main() -> None:
                     Lmsg_d.backward()
                     opt_d.step()
 
-                # -------------------------
-                # (B) Joint step (E + D)
-                # -------------------------
+                # =========================
+                # (B) joint step (E + D)
+                # =========================
                 set_requires_grad(enc, True)
                 set_requires_grad(dec, True)
 
@@ -219,7 +228,6 @@ def main() -> None:
                 opt_e.step()
                 opt_d.step()
 
-                # metrics
                 with torch.no_grad():
                     batch_psnr = psnr(x, x_stego)
                     batch_ber = ber_from_logits(logits, m_bits)
@@ -253,11 +261,10 @@ def main() -> None:
                         f"loss={avg_loss:.4f} (Lmsg={avg_lmsg:.4f} Limg={avg_limg:.6f} Ld={avg_ldelta:.6f}) "
                         f"PSNR={avg_psnr:.2f} BER={avg_ber:.4f} acc={avg_acc:.4f} "
                         f"logits(mean/std)={logits_mean:.3f}/{logits_std:.3f} "
-                        f"(alpha={alpha:g}, beta={beta:g}, lambda_delta={lambda_delta:g}, noise={noise_val:g})"
+                        f"(eps={eps:g}, alpha={alpha:g}, beta={beta:g}, lambda_delta={lambda_delta:g}, noise={noise_val:g})"
                     )
                     print(f"  m_bits.mean  : {mb_mean:.3f}    |delta|.mean : {delta_mean:.6f}")
 
-            # epoch summary
             avg_psnr = running_psnr / max(1, n_steps)
             avg_ber = running_ber / max(1, n_steps)
             avg_acc = running_acc / max(1, n_steps)
@@ -273,7 +280,15 @@ def main() -> None:
 
             if (epoch_idx + 1) % cfg.save_every_epochs == 0:
                 ckpt_path = os.path.join(cfg.save_dir, f"stego_ed_epoch{epoch_idx+1}.pt")
-                save_checkpoint(ckpt_path, enc=enc, dec=dec, opt_e=opt_e, opt_d=opt_d, epoch_idx=epoch_idx, cfg=cfg)
+                save_checkpoint(
+                    ckpt_path,
+                    enc=enc,
+                    dec=dec,
+                    opt_e=opt_e,
+                    opt_d=opt_d,
+                    epoch_idx=epoch_idx,
+                    cfg=cfg,
+                )
                 print("Saved:", ckpt_path)
 
         final_path = os.path.join(cfg.save_dir, "stego_ed_final.pt")

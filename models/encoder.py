@@ -5,13 +5,19 @@ import torch.nn as nn
 
 
 class Encoder(nn.Module):
+    """
+    Encoder(A): takes image X [B,3,32,32] and message bits M [B,L],
+    outputs stego image X' [B,3,32,32] in [-1, 1].
+
+    Key: single tanh + eps scaling (no tanh inside net).
+    eps is adjustable from train.py via set_eps() for bootstrap scheduling.
+    """
     def __init__(self, L: int, hidden: int = 64, eps: float = 0.20):
         super().__init__()
-        self.L = L
+        self.L = int(L)
         self.eps = float(eps)
-        in_ch = 3 + L
+        in_ch = 3 + self.L
 
-        # ВАЖНО: без nn.Tanh() здесь
         self.net = nn.Sequential(
             nn.Conv2d(in_ch, hidden, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -22,10 +28,13 @@ class Encoder(nn.Module):
             nn.Conv2d(hidden, 3, 1),
         )
 
+    def set_eps(self, eps: float) -> None:
+        self.eps = float(eps)
+
     def forward(self, x: torch.Tensor, m_bits: torch.Tensor, return_delta: bool = False):
         B, _, H, W = x.shape
 
-        # лучше: {0,1} -> {-1,+1}
+        # map bits {0,1} -> {-1,+1} and broadcast to spatial map
         m = m_bits * 2.0 - 1.0
         m_map = m.view(B, self.L, 1, 1).expand(B, self.L, H, W)
 

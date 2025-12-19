@@ -1,12 +1,7 @@
-# Метрики:
-# PSNR — незаметность
-# BER (Bit Error Rate) — надёжность канала
-# Accuracy для декодирования
-
 # utils/metrics.py
 from __future__ import annotations
-import torch
 import math
+import torch
 
 
 def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 2.0) -> float:
@@ -24,6 +19,5 @@ def ber_from_logits(logits: torch.Tensor, target_bits: torch.Tensor) -> float:
     """
     Bit Error Rate for decoder logits [B,L] vs target bits {0,1}.
     """
-    pred = (logits > 0).float()   # ❗ порог по логитам, НЕ sigmoid
-    err = (pred != target_bits).float().mean().item()
-    return err
+    pred = (logits > 0).float()
+    return (pred != target_bits).float().mean().item()
