@@ -29,7 +29,7 @@ class Cfg:
     batch_size: int = 256
     epochs: int = 10
     lr_g: float = 2e-4
-    lr_d: float = 2e-4
+    lr_d: float = 1e-4
 
     # init ckpts
     init_stego_ckpt: str = "checkpoints/stego_ed_channel_epoch10.pt"
@@ -49,7 +49,7 @@ class Cfg:
 
     # how often to train D relative to G
     d_steps: int = 1
-    g_steps: int = 3
+    g_steps: int = 4
 
     # channel (same as step 3)
     ch: ChannelCfg = field(default_factory=lambda: ChannelCfg(
