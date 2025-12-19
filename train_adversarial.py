@@ -42,14 +42,14 @@ class Cfg:
     alpha: float = 1.0     # image MSE on (x_stego vs x)
     beta: float = 9.0      # message BCE on (Dec(channel(x_stego)) vs bits)
     gamma_start: float = 0.0   # adv weight ramp
-    gamma_end: float = 1.00
+    gamma_end: float = 1.50
     gamma_warm_epochs: int = 4  # epochs where gamma ramps up
 
     lam_delta: float = 0.001
 
     # how often to train D relative to G
     d_steps: int = 1
-    g_steps: int = 2
+    g_steps: int = 3
 
     # channel (same as step 3)
     ch: ChannelCfg = field(default_factory=lambda: ChannelCfg(
@@ -195,6 +195,9 @@ def main():
                     torch.zeros(B, device=device),
                     torch.ones(B, device=device),
                 ], dim=0)
+
+                # label smoothing
+                y_mix = y_mix * 0.9 + 0.05   # 0->0.05, 1->0.95
 
                 with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
                     logits = D(x_mix)
