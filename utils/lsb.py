@@ -63,7 +63,8 @@ def extract_bits_lsb(x_stego: torch.Tensor, L: int) -> torch.Tensor:
     B, _, H, W = x_stego.shape
     assert L <= H * W, "Not enough pixels to extract L bits."
 
-    xu8 = _to_uint8(x).clone()
+    xu8 = _to_uint8(x_stego).clone()
+
 
     blue = xu8[:, 2, :, :].clone()              # <- важный clone
     b = blue.reshape(B, H * W)
