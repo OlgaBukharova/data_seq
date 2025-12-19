@@ -207,9 +207,9 @@ def main() -> None:
                     demo_logits = dec(x0_stego)
                     demo_out_bits = threshold_logits_to_bits(demo_logits[0]).float()
                     demo_ber = (demo_out_bits != demo_bits[0]).float().mean().item()
-                    decoded = bits_to_string(demo_out_bits)
+                    #decoded = bits_to_string(demo_out_bits)
                     print(f"  demo BER     : {demo_ber:.4f}")
-                    print(f"  demo decoded : {decoded!r}")
+                    #print(f"  demo decoded : {decoded!r}")
                     print(f"  demo target  : {demo_texts[0]!r}")
 
             avg_psnr = running_psnr / max(1, n_steps)
