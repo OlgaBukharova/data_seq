@@ -30,7 +30,9 @@ class Encoder(nn.Module):
         m_map = m_bits.view(B, self.L, 1, 1).repeat(1, 1, H, W)
         inp = torch.cat([x, m_map], dim=1)
         delta = 0.20 * self.net(inp)
-        x_stego = torch.clamp(x + delta, -1.0, 1.0)
+        eps = 0.05  # стартовое значение
+        delta = torch.tanh(delta) * eps
+        x_stego = torch.clamp(x + delta, -1, 1)
         if return_delta:
             return x_stego, delta
         return x_stego

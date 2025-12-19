@@ -41,8 +41,10 @@ def main():
     loss_img = nn.MSELoss()
     loss_msg = nn.BCEWithLogitsLoss()
 
-    beta = 12.0
-    alpha = 1.0
+    if epoch < 3:
+        alpha, beta = 0.1, 10.0
+    else:
+        alpha, beta = 1.0, 2.0
 
     enc.train()
     dec.train()
@@ -94,7 +96,13 @@ def main():
                 demo_bits = threshold_logits_to_bits(logits[0]).float()
                 demo_ber = (demo_bits != m_bits[0]).float().mean().item()
                 print("  demo BER     :", f"{demo_ber:.4f}")
-
+                
+            with torch.no_grad():
+                acc = ((logits > 0).float() == m_bits).float().mean().item()
+                print("bit_acc:", round(acc, 4),
+            "logits mean/std:",
+            round(logits.mean().item(), 4),
+            round(logits.std().item(), 4))
         print(f"Epoch {epoch}: PSNR={running_psnr/n_steps:.2f} BER={running_ber/n_steps:.4f}")
 
     # Save

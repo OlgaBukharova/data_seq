@@ -22,8 +22,8 @@ def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 2.0) -> float:
 
 def ber_from_logits(logits: torch.Tensor, target_bits: torch.Tensor) -> float:
     """
-    Bit Error Rate for decoder logits [B,L] vs target bits {0,1} float [B,L].
+    Bit Error Rate for decoder logits [B,L] vs target bits {0,1}.
     """
-    pred = (torch.sigmoid(logits) >= 0.5).float()
+    pred = (logits > 0).float()   # ❗ порог по логитам, НЕ sigmoid
     err = (pred != target_bits).float().mean().item()
     return err
