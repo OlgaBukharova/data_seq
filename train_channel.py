@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 import os
@@ -43,11 +44,12 @@ class Cfg:
     eps: float = 0.20
 
     # channel config
-    ch: ChannelCfg = ChannelCfg(
+    ch: ChannelCfg = field(default_factory=lambda: ChannelCfg(
         p_noise=0.50, noise_std=0.03,
         p_resize=0.30, resize_min=0.60, resize_max=1.00,
         p_crop=0.30, crop_min=0.70, crop_max=1.00,
-    )
+    ))
+
 
     num_workers: int = 2
     pin_memory: bool = True
