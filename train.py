@@ -118,12 +118,14 @@ def main() -> None:
 
     try:
         for epoch_idx in range(cfg.epochs):
-            if epoch_idx < cfg.warmup_epochs:
-                alpha = cfg.alpha_img_warmup
-                beta = cfg.beta_msg_warmup
+            if epoch_idx < 3:
+                alpha = 0.1
+                beta = 10.0
+                lambda_delta = 0.0
             else:
-                alpha = cfg.alpha_img_main
-                beta = cfg.beta_msg_main
+                alpha = 0.5
+                beta = 6.0
+                lambda_delta = 0.002
 
             running_psnr = 0.0
             running_ber = 0.0
@@ -145,7 +147,7 @@ def main() -> None:
                 Lmsg = loss_msg_fn(logits, m_bits)
                 Ldelta = delta.abs().mean()
 
-                loss = alpha * Limg + beta * Lmsg + cfg.lambda_delta * Ldelta
+                loss = alpha * Limg + beta * Lmsg + lambda_delta * Ldelta
 
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
