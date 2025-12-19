@@ -27,15 +27,20 @@ class TrainConfig:
     epochs: int = 15
     lr: float = 3e-4
 
-    # Curriculum
+    # Curriculum (tuned to avoid encoder collapse)
     warmup_epochs: int = 3
+
     alpha_img_warmup: float = 0.1
     beta_msg_warmup: float = 10.0
+    lambda_delta_warmup: float = 0.0  # IMPORTANT: don't kill delta at the start
 
     alpha_img_main: float = 0.5
-    beta_msg_main: float = 6.0
+    beta_msg_main: float = 10.0
+    lambda_delta_main: float = 0.002
 
-    lambda_delta: float = 0.002  # slightly weaker than 0.005 (prevents collapse)
+    # Channel noise (helps decoder learn faster / more robustly)
+    noise_after_epoch: int = 1        # start adding noise from this epoch (0-based)
+    noise_std: float = 0.01           # in [-1,1] scale
 
     # Logging / saving
     log_every_steps: int = 200
@@ -76,6 +81,11 @@ def save_checkpoint(
     )
 
 
+def make_balanced_random_bits(batch_size: int, L: int, device: torch.device) -> torch.Tensor:
+    """Balanced random {0,1} bits with P(1)=0.5. Shape [B,L]."""
+    return torch.randint(0, 2, (batch_size, L), device=device).float()
+
+
 def main() -> None:
     cfg = TrainConfig()
 
@@ -85,7 +95,7 @@ def main() -> None:
     set_seed(cfg.seed)
     ensure_dir(cfg.save_dir)
 
-    # CIFAR10 normalized to [-1,1]
+    # Data: CIFAR10 normalized to [-1,1]
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -103,13 +113,20 @@ def main() -> None:
     )
 
     # Models
-    enc = Encoder(L=cfg.L, hidden=64, eps=0.10).to(device)
+    # NOTE: Encoder uses eps internally in models/encoder.py
+    enc = Encoder(L=cfg.L, hidden=64).to(device)
+    # Stronger decoder helps capacity for 256 bits
     dec = Decoder(L=cfg.L, hidden=256).to(device)
 
-    opt = torch.optim.Adam([
-        {"params": enc.parameters(), "lr": cfg.lr},
-        {"params": dec.parameters(), "lr": cfg.lr * 2.0},
-    ])
+    # Separate LR (optional but helpful): decoder learns a bit faster
+    opt = torch.optim.Adam(
+        [
+            {"params": enc.parameters(), "lr": cfg.lr},
+            {"params": dec.parameters(), "lr": cfg.lr * 2.0},
+        ]
+    )
+
+    # Losses
     loss_img_fn = nn.MSELoss()
     loss_msg_fn = nn.BCEWithLogitsLoss()
 
@@ -120,41 +137,58 @@ def main() -> None:
 
     try:
         for epoch_idx in range(cfg.epochs):
-            if epoch_idx < 3:
-                alpha = 0.1
-                beta = 10.0
-                lambda_delta = 0.0
+            # ---- curriculum (inside epoch loop) ----
+            if epoch_idx < cfg.warmup_epochs:
+                alpha = cfg.alpha_img_warmup
+                beta = cfg.beta_msg_warmup
+                lambda_delta = cfg.lambda_delta_warmup
             else:
-                alpha = 0.5
-                beta = 10.0
-                lambda_delta = 0.002
+                alpha = cfg.alpha_img_main
+                beta = cfg.beta_msg_main
+                lambda_delta = cfg.lambda_delta_main
 
             running_psnr = 0.0
             running_ber = 0.0
             running_acc = 0.0
             running_loss = 0.0
+            running_lmsg = 0.0
+            running_limg = 0.0
+            running_ldelta = 0.0
             n_steps = 0
 
             for x, _ in train_loader:
                 n_steps += 1
-                x = x.to(device, non_blocking=True)
+                x = x.to(device, non_blocking=True)  # [B,3,32,32] in [-1,1]
 
-                # Balanced random bits (p=0.5)
-                m_bits = torch.randint(0, 2, (x.size(0), cfg.L), device=device).float()
+                # Balanced training payload
+                m_bits = make_balanced_random_bits(x.size(0), cfg.L, device=device)
 
+                # Forward encoder
                 x_stego, delta = enc(x, m_bits, return_delta=True)
-                logits = dec(x_stego)
 
+                # Mild channel noise (from epoch >= noise_after_epoch)
+                if epoch_idx >= cfg.noise_after_epoch and cfg.noise_std > 0:
+                    x_stego_in = x_stego + cfg.noise_std * torch.randn_like(x_stego)
+                    x_stego_in = torch.clamp(x_stego_in, -1, 1)
+                else:
+                    x_stego_in = x_stego
+
+                # Decode logits
+                logits = dec(x_stego_in)  # logits [B,L]
+
+                # Loss terms
                 Limg = loss_img_fn(x_stego, x)
                 Lmsg = loss_msg_fn(logits, m_bits)
                 Ldelta = delta.abs().mean()
 
                 loss = alpha * Limg + beta * Lmsg + lambda_delta * Ldelta
 
+                # Backprop
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 opt.step()
 
+                # Metrics
                 with torch.no_grad():
                     batch_psnr = psnr(x, x_stego)
                     batch_ber = ber_from_logits(logits, m_bits)
@@ -164,12 +198,19 @@ def main() -> None:
                     running_ber += batch_ber
                     running_acc += bit_acc
                     running_loss += loss.item()
+                    running_lmsg += Lmsg.item()
+                    running_limg += Limg.item()
+                    running_ldelta += Ldelta.item()
 
+                # Logging
                 if n_steps % cfg.log_every_steps == 0:
                     avg_psnr = running_psnr / n_steps
                     avg_ber = running_ber / n_steps
                     avg_acc = running_acc / n_steps
                     avg_loss = running_loss / n_steps
+                    avg_lmsg = running_lmsg / n_steps
+                    avg_limg = running_limg / n_steps
+                    avg_ldelta = running_ldelta / n_steps
 
                     with torch.no_grad():
                         logits_mean = logits.mean().item()
@@ -179,25 +220,34 @@ def main() -> None:
 
                     print(
                         f"[epoch {epoch_idx+1}/{cfg.epochs} step {n_steps}] "
-                        f"loss={avg_loss:.4f} PSNR={avg_psnr:.2f} "
-                        f"BER={avg_ber:.4f} acc={avg_acc:.4f} "
+                        f"loss={avg_loss:.4f} (Lmsg={avg_lmsg:.4f} Limg={avg_limg:.6f} Ld={avg_ldelta:.6f}) "
+                        f"PSNR={avg_psnr:.2f} BER={avg_ber:.4f} acc={avg_acc:.4f} "
                         f"logits(mean/std)={logits_mean:.3f}/{logits_std:.3f} "
-                        f"(alpha={alpha:g}, beta={beta:g}, lambda_delta={cfg.lambda_delta:g})"
+                        f"(alpha={alpha:g}, beta={beta:g}, lambda_delta={lambda_delta:g}, noise={cfg.noise_std if epoch_idx>=cfg.noise_after_epoch else 0:g})"
                     )
                     print(f"  m_bits.mean  : {mb_mean:.3f}    |delta|.mean : {delta_mean:.6f}")
 
+            # End of epoch summary
             avg_psnr = running_psnr / max(1, n_steps)
             avg_ber = running_ber / max(1, n_steps)
             avg_acc = running_acc / max(1, n_steps)
             avg_loss = running_loss / max(1, n_steps)
+            avg_lmsg = running_lmsg / max(1, n_steps)
+            avg_limg = running_limg / max(1, n_steps)
+            avg_ldelta = running_ldelta / max(1, n_steps)
 
-            print(f"Epoch {epoch_idx+1}: loss={avg_loss:.4f} PSNR={avg_psnr:.2f} BER={avg_ber:.4f} acc={avg_acc:.4f}")
+            print(
+                f"Epoch {epoch_idx+1}: loss={avg_loss:.4f} (Lmsg={avg_lmsg:.4f} Limg={avg_limg:.6f} Ld={avg_ldelta:.6f}) "
+                f"PSNR={avg_psnr:.2f} BER={avg_ber:.4f} acc={avg_acc:.4f}"
+            )
 
+            # Save checkpoint
             if (epoch_idx + 1) % cfg.save_every_epochs == 0:
                 ckpt_path = os.path.join(cfg.save_dir, f"stego_ed_epoch{epoch_idx+1}.pt")
                 save_checkpoint(ckpt_path, enc=enc, dec=dec, opt=opt, epoch_idx=epoch_idx, cfg=cfg)
                 print("Saved:", ckpt_path)
 
+        # Final save
         final_path = os.path.join(cfg.save_dir, "stego_ed_final.pt")
         save_checkpoint(final_path, enc=enc, dec=dec, opt=opt, epoch_idx=cfg.epochs - 1, cfg=cfg)
         print("Saved:", final_path)
